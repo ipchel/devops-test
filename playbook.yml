@@ -1,0 +1,176 @@
+---
+- hosts: all
+  become: true
+  tasks:
+    # Установка необходимых пакетов
+    - name: Install required packages
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+        state: present
+        update_cache: yes
+    
+    # Установка Docker
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+    
+    - name: Add Docker repository
+      apt_repository:
+        repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu focal stable
+        state: present
+    
+    - name: Install Docker
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose
+        state: present
+        update_cache: yes
+    
+    - name: Add vagrant user to docker group
+      user:
+        name: vagrant
+        groups: docker
+        append: yes
+    
+    # Установка Node Exporter
+    - name: Download Node Exporter
+      get_url:
+        url: https://github.com/prometheus/node_exporter/releases/download/v1.5.0/node_exporter-1.5.0.linux-amd64.tar.gz
+        dest: /tmp/node_exporter.tar.gz
+    
+    - name: Extract Node Exporter
+      unarchive:
+        src: /tmp/node_exporter.tar.gz
+        dest: /tmp
+        remote_src: yes
+    
+    - name: Move Node Exporter binary
+      copy:
+        src: /tmp/node_exporter-1.5.0.linux-amd64/node_exporter
+        dest: /usr/local/bin/
+        mode: 0755
+        remote_src: yes
+    
+    - name: Create Node Exporter systemd service
+      copy:
+        content: |
+          [Unit]
+          Description=Node Exporter
+          After=network.target
+          
+          [Service]
+          User=root
+          ExecStart=/usr/local/bin/node_exporter
+          Restart=always
+          
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/node_exporter.service
+    
+    - name: Start and enable Node Exporter
+      systemd:
+        name: node_exporter
+        state: started
+        enabled: yes
+        daemon_reload: yes
+    
+    # Настройка Prometheus и Grafana
+    - name: Create monitoring directory
+      file:
+        path: "{{ item }}"
+        state: directory
+      with_items:
+        - ~/monitoring
+        - ~/monitoring/prometheus
+        - ~/monitoring/grafana
+        - ~/monitoring/grafana/provisioning
+        - ~/monitoring/grafana/provisioning/datasources
+        - ~/monitoring/grafana/provisioning/dashboards
+    
+    - name: Copy Prometheus config
+      copy:
+        content: |
+          global:
+            scrape_interval: 15s
+          
+          scrape_configs:
+            - job_name: 'node'
+              static_configs:
+                - targets: ['172.17.0.1:9100']
+        dest: ~/monitoring/prometheus/prometheus.yml
+    
+    - name: Create Grafana datasource config
+      copy:
+        content: |
+          apiVersion: 1
+          
+          datasources:
+            - name: Prometheus
+              type: prometheus
+              access: proxy
+              url: http://prometheus:9090
+              isDefault: true
+        dest: ~/monitoring/grafana/provisioning/datasources/prometheus.yml
+    
+    - name: Create Grafana dashboard config
+      copy:
+        content: |
+          apiVersion: 1
+          
+          providers:
+            - name: 'default'
+              orgId: 1
+              folder: ''
+              type: file
+              disableDeletion: false
+              updateIntervalSeconds: 10
+              options:
+                path: /etc/grafana/provisioning/dashboards
+        dest: ~/monitoring/grafana/provisioning/dashboards/dashboard.yml
+    
+    - name: Download Node Exporter Full dashboard
+      get_url:
+        url: https://grafana.com/api/dashboards/1860/revisions/27/download
+        dest: ~/monitoring/grafana/provisioning/dashboards/node_exporter_full.json
+    
+    - name: Create docker-compose.yml
+      copy:
+        content: |
+          version: '3'
+          
+          services:
+            prometheus:
+              image: prom/prometheus
+              ports:
+                - "9090:9090"
+              volumes:
+                - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+              restart: always
+          
+            grafana:
+              image: grafana/grafana
+              ports:
+                - "3000:3000"
+              volumes:
+                - ./grafana/provisioning:/etc/grafana/provisioning
+                - grafana-storage:/var/lib/grafana
+              environment:
+                - GF_SECURITY_ADMIN_PASSWORD=admin
+                - GF_USERS_ALLOW_SIGN_UP=false
+              restart: always
+          
+          volumes:
+            grafana-storage:
+        dest: ~/monitoring/docker-compose.yml
+    
+    - name: Start monitoring containers
+      shell: cd ~/monitoring && docker-compose up -d
